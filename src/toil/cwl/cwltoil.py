@@ -3573,6 +3573,18 @@ class CWLScatter(Job):
         self.conditional = conditional
         self.parent_name = parent_name
 
+    def _scatter_parent_name(self, idx: int) -> str:
+        """
+        Build a parent name that encodes the workflow step and scatter index.
+
+        Uses the form "<parent>.<step>.<n>" when a parent name is available,
+        and "<step>.<n>" otherwise.
+        """
+        step_id_short = shortname(cast(str, self.step.tool["id"]))
+        if self.parent_name:
+            return f"{self.parent_name}.{step_id_short}.{idx}"
+        return f"{step_id_short}.{idx}"
+
     def flat_crossproduct_scatter(
         self,
         joborder: CWLObjectType,
@@ -3593,7 +3605,7 @@ class CWLScatter(Job):
                     tool=self.step.embedded_tool,
                     jobobj=updated_joborder,
                     runtime_context=self.runtime_context,
-                    parent_name=f"{self.parent_name}.{n}",
+                    parent_name=self._scatter_parent_name(n),
                     conditional=self.conditional,
                 )
                 self.addChild(subjob)
@@ -3623,7 +3635,7 @@ class CWLScatter(Job):
                     tool=self.step.embedded_tool,
                     jobobj=updated_joborder,
                     runtime_context=self.runtime_context,
-                    parent_name=f"{self.parent_name}.{n}",
+                    parent_name=self._scatter_parent_name(n),
                     conditional=self.conditional,
                 )
                 self.addChild(subjob)
@@ -3690,7 +3702,7 @@ class CWLScatter(Job):
                     tool=self.step.embedded_tool,
                     jobobj=copyjob,
                     runtime_context=self.runtime_context,
-                    parent_name=f"{self.parent_name}.{i}",
+                    parent_name=self._scatter_parent_name(i),
                     conditional=self.conditional,
                 )
                 self.addChild(subjob)
@@ -3995,9 +4007,10 @@ class CWLLoop(Job):
             assert self.previous_outputs is not None
             return unwrap(self.previous_outputs)
 
+        step_id_short = shortname(cast(str, self.step.tool["id"]))
         if self.iteration >= self.iteration_limit:
             raise cwl_utils.errors.WorkflowException(
-            f"cwltool:Loop on step {shortname(self.step.tool['id'])!r} "
+            f"cwltool:Loop on step {step_id_short!r} "
             f"exceeded the iteration limit of {self.iteration_limit}. "
             "Raise the limit via --cwl-loop-iteration-limit, or check "
             "that `loopWhen` is intended to eventually become false."
@@ -4007,7 +4020,7 @@ class CWLLoop(Job):
             tool=self.step.embedded_tool,
             jobobj=UnresolvedDict({k: JustAValue(v) for k, v in cwljob.items()}),
             runtime_context=self.runtime_context,
-            parent_name=f"{self.parent_name}.iteration{self.iteration}",
+            parent_name=f"{self.parent_name}.{step_id_short}.iteration{self.iteration}",
             conditional=None,
         )
 
