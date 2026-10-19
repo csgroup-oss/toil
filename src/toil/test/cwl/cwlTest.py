@@ -2263,6 +2263,97 @@ def test_captured_stderr_for_failed_job_is_reported(tmp_path: Path) -> None:
 @needs_cwl
 @pytest.mark.cwl
 @pytest.mark.cwl_small
+@pytest.mark.parametrize("requirement_kind", ["requirements", "hints"])
+@pytest.mark.parametrize("source_value", [None, 7])
+@pytest.mark.parametrize(
+    "timelimit", [12, "$(3*4)", "$(inputs.seconds)", "${return inputs.seconds;}"]
+)
+def test_timelimit_with_unresolved_inputs(
+    requirement_kind: str, source_value: int | None, timelimit: int | str
+) -> None:
+    """Time limits are evaluated only after step inputs and defaults resolve."""
+    from cwltool.context import RuntimeContext
+    from cwltool.load_tool import load_tool
+
+    from toil.cwl.cwltoil import (
+        CWLJob,
+        CWLJobWrapper,
+        DefaultWithSource,
+        JustAValue,
+        UnresolvedDict,
+        makeJob,
+    )
+
+    tool = load_tool(
+        {
+            "id": "file:///timelimit.cwl",
+            "cwlVersion": "v1.2",
+            "class": "CommandLineTool",
+            "baseCommand": "true",
+            "inputs": {"seconds": "int"},
+            "outputs": [],
+            "requirements": {"InlineJavascriptRequirement": {}},
+            **{
+                requirement_kind: [
+                    {"class": "InlineJavascriptRequirement"},
+                    {"class": "ToolTimeLimit", "timelimit": timelimit},
+                ]
+            },
+        }
+    )
+    runtime_context = RuntimeContext()
+    setattr(runtime_context, "cwl_default_ram", False)
+    setattr(runtime_context, "cwl_min_ram", None)
+    setattr(runtime_context, "workdir", "")
+    inputs = UnresolvedDict(
+        {"seconds": DefaultWithSource(12, JustAValue(source_value))}
+    )
+
+    job, follow_on = makeJob(tool, inputs, runtime_context, None, None)
+    assert job is follow_on
+    if isinstance(timelimit, str):
+        assert isinstance(job, CWLJobWrapper)
+        with patch.object(job, "addChild") as add_child:
+            job.run(Mock(spec=AbstractFileStore))
+        child = add_child.call_args.args[0]
+        assert isinstance(child, CWLJob)
+        resolved_seconds = source_value if source_value is not None else 12
+        assert child.cwljob == {"seconds": resolved_seconds}
+        expected = resolved_seconds if "inputs.seconds" in timelimit else 12
+        assert child.walltime == expected
+    else:
+        assert isinstance(job, CWLJob)
+        assert job.walltime == timelimit
+
+
+@needs_cwl
+@pytest.mark.cwl
+@pytest.mark.cwl_small
+@pytest.mark.parametrize(
+    "time_limit", [3, 1]
+)
+def test_timelimit_workflow(tmp_path: Path,time_limit: int) -> None:
+    """Workflow time limits accept expression."""
+    with get_data("test/cwl/timelimit_workflow.cwl") as cwl_file:
+        cmd = [
+            "toil-cwl-runner",
+            f"--jobStore=file:{tmp_path / 'jobStore'}",
+            "--no-container",
+            str(cwl_file),
+            "--duration",
+            "1",
+            "--timeLimit",
+            "2",
+        ]
+        p = subprocess.run(cmd, capture_output=True, text=True)
+        assert p.returncode == 0
+        assert p.stderr
+        assert json.loads(p.stdout) == {}
+
+
+@needs_cwl
+@pytest.mark.cwl
+@pytest.mark.cwl_small
 def test_timelimit_expression(tmp_path: Path) -> None:
     with get_data("test/cwl/timelimit.cwl") as cwl_file:
         cmd = [

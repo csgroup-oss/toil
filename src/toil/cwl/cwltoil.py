@@ -3563,6 +3563,7 @@ def makeJob(
         # Decide if we have any requirements we care about that are dynamic
         REQUIREMENT_TYPES = [
             "ResourceRequirement",
+            "ToolTimeLimit",
             "http://commonwl.org/cwltool#CUDARequirement",
         ]
         has_dynamic_resource_requirement = False
