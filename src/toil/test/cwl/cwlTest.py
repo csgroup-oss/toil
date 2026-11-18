@@ -31,7 +31,7 @@ from unittest.mock import ANY, Mock, call, patch
 from urllib.request import urlretrieve
 
 if TYPE_CHECKING:
-    from cwl_utils.types import CWLObjectType
+    from cwl_utils.types import CWLDirectoryType, CWLObjectType
 
 import pytest
 
@@ -620,6 +620,134 @@ class TestCWLWorkflow:
                     tmp_path,
                     main_args=["--bypass-file-store"],
                 )
+
+    @pytest.mark.parametrize("writable", [False, True])
+    def test_writable_directory_path_mappings(self, writable: bool) -> None:
+        """Descendant mappings inherit writability without changing input metadata."""
+        from cwl_utils.types import is_directory
+        from cwltool.context import LoadingContext
+        from cwltool.pathmapper import PathMapper
+
+        from toil.cwl.cwltoil import ToilCommandLineTool
+
+        tool = ToilCommandLineTool(
+            {"class": "CommandLineTool", "inputs": [], "outputs": []},
+            LoadingContext(),
+        )
+        directory = cast(
+            "CWLDirectoryType",
+            {
+                "class": "Directory",
+                "location": "parent",
+                "basename": "output_0",
+                "writable": writable,
+                "listing": [
+                    {
+                        "class": "Directory",
+                        "location": "child",
+                        "basename": "product",
+                        "listing": [
+                            {
+                                "class": "File",
+                                "location": "file",
+                                "basename": "existing.txt",
+                            }
+                        ],
+                    }
+                ],
+            },
+        )
+        pathmap = PathMapper([], "", "/stage")
+        for location, kind in [
+            ("parent", "Directory"),
+            ("child", "Directory"),
+            ("file", "File"),
+        ]:
+            pathmap.update(
+                location, f"/download/{location}", f"/stage/{location}", kind, True
+            )
+
+        tool.updatePathmap("/work", pathmap, directory)
+
+        for location, target, kind in [
+            ("parent", "/work/output_0", "Directory"),
+            ("child", "/work/output_0/product", "Directory"),
+            ("file", "/work/output_0/product/existing.txt", "File"),
+        ]:
+            mapping = pathmap.mapper(location)
+            assert mapping.resolved == f"/download/{location}"
+            assert mapping.target == target
+            assert mapping.type == ("Writable" if writable else "") + kind
+            assert mapping.staged is False
+        child = directory["listing"][0]
+        assert is_directory(child)
+        assert "writable" not in child
+        assert "writable" not in child["listing"][0]
+
+    @pytest.mark.parametrize("bypass_file_store", [False, True])
+    def test_writable_directory_outputs(
+        self, tmp_path: Path, bypass_file_store: bool
+    ) -> None:
+        """Overlapping output globs expose the same modified directory contents."""
+        from cwl_utils.types import is_directory
+
+        from toil.cwl import cwltoil
+
+        def directory_contents(directory: "CWLDirectoryType") -> dict[str, bytes]:
+            contents: dict[str, bytes] = {}
+            for child in directory["listing"]:
+                if is_directory(child):
+                    for name, value in directory_contents(child).items():
+                        contents[f"{child['basename']}/{name}"] = value
+                else:
+                    contents[child["basename"]] = Path(child["path"]).read_bytes()
+
+            root = Path(directory["path"])
+            exported = {
+                str(path.relative_to(root)): path.read_bytes()
+                for path in root.rglob("*")
+                if path.is_file()
+            }
+            assert contents == exported
+            return contents
+
+        args = ["--outdir", str(tmp_path / "out"), "--retryCount", "0"]
+        if bypass_file_store:
+            args.append("--bypass-file-store")
+        stdout = StringIO()
+        with get_data("test/cwl/writable_directory_outputs.cwl") as cwl_file:
+            cwltoil.main([*args, str(cwl_file)], stdout=stdout)
+        outputs = json.loads(stdout.getvalue())
+
+        expected = {
+            "existing.txt": b"updated\n",
+            "nested/existing.txt": b"updated\n",
+            "nested/new.txt": b"created\n",
+            "test.txt": b"",
+        }
+        product_names = {"product_1", "product_2", "product_3"}
+        assert len(outputs["parents"]) == 1
+        parent = outputs["parents"][0]
+        assert {child["basename"] for child in parent["listing"]} == product_names
+        assert len(outputs["products"]) == 3
+        assert {child["basename"] for child in outputs["products"]} == product_names
+        for product in [*parent["listing"], *outputs["products"]]:
+            assert directory_contents(product) == expected
+
+        assert len(outputs["files"]) == 6
+        for file in outputs["files"]:
+            assert Path(file["path"]).read_bytes() == b"updated\n"
+
+        original = {
+            "existing.txt": b"original\n",
+            "nested/existing.txt": b"original\n",
+            "obsolete.txt": b"obsolete\n",
+        }
+        assert directory_contents(outputs["original"]) == {
+            f"{product}/{name}": contents
+            for product in product_names
+            for name, contents in original.items()
+        }
 
     def test_required_input_condition_protection(self, tmp_path: Path) -> None:
         # This doesn't run containerized
