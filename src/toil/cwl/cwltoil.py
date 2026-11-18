@@ -1066,6 +1066,31 @@ class ToilCommandLineTool(
     CWL CommandLineTool that connects to ToilPathMapper and other hooks.
     """
 
+    def updatePathmap(
+        self, outdir: str, pathmap: PathMapper, fn: CWLFileType | CWLDirectoryType
+    ) -> None:
+        """Update paths, preserving writability for descendants of writable directories."""
+        super().updatePathmap(outdir, pathmap, fn)
+
+        if is_directory(fn) and fn.get("writable"):
+            # cwltool updates each child's mapping using only its own writable
+            # flag. Reverse mapping must not treat a writable directory's children
+            # as unchanged inputs and return their original downloaded copies.
+            def mark_writable(child: CWLFileType | CWLDirectoryType) -> None:
+                location = child.get("location")
+                if location is not None and location in pathmap:
+                    mapping = pathmap.mapper(location)
+                    if mapping.type in ("File", "Directory"):
+                        pathmap.update(
+                            location,
+                            mapping.resolved,
+                            mapping.target,
+                            "Writable" + mapping.type,
+                            mapping.staged,
+                        )
+
+            visit_class(fn.get("listing", []), ("File", "Directory"), mark_writable)
+
     def make_job_runner(
         self, runtimeContext: cwltool.context.RuntimeContext
     ) -> type[cwltool.job.JobBase]:
